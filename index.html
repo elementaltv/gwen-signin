@@ -61,9 +61,9 @@ async function main() {
   const who = data.user?.email || session.user?.email || 'your account';
   // Already allowed before: Supabase gives the way back straight away. Say who is signed in, so a person
   // with two accounts can switch before going back.
-  if (data.redirect_uri) {
+  if (data.redirect_url) {
     say('Continue to Claude?', `You are signed in as ${who}.`);
-    button(`Continue as ${who}`, () => { location.href = data.redirect_uri; }, 'go');
+    button(`Continue as ${who}`, () => { location.href = data.redirect_url; }, 'go');
     return button('Use a different account', switchAccount);
   }
   say('Allow Gwen Data?', `${data.client?.client_name || data.client?.name || 'Claude'} wants to read and keep your Gwen history as ${who}. You can stop this at any time.`);
