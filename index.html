@@ -23,13 +23,26 @@
   <p id="msg"></p>
   <div class="row" id="buttons"></div>
 </main>
+<!-- The auth library is kept next to this page at an exact version (vendor/README.md). The browser refuses it
+     if its bytes do not match this hash. Update the hash with the file. -->
+<script type="importmap">
+{ "integrity": { "./vendor/supabase-js-2.80.0.js": "sha384-TReyjPkYfIrJmw50nJRCPhIRRFV7k6t3o+CQbeIuO/npyWX4wluylmYmsGAQcQwf" } }
+</script>
 <script type="module">
 // Sign-in screen for Gwen Data. Supabase Auth sends people here, with an authorization_id, when a Claude
 // connector asks to sign in. Settings come from config.js (public by design).
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.80.0';
+import { createClient } from './vendor/supabase-js-2.80.0.js';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Privacy review D2: this page is served from elementaltv.github.io, an address every Pages site of the organisation shares, so
+// anything kept in that address's localStorage can be read by a script on any of them. The sign-in is kept in this tab only
+// (sessionStorage, gone when the tab closes), and this page signs out of it before it sends the person back to Claude: Claude's
+// own access comes from the approval, never from this browser session.
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storage: globalThis.sessionStorage, persistSession: true, autoRefreshToken: false } });
+// A sign-in an earlier version of this page left in the shared localStorage is removed on every visit (G9 security review of #385).
+try { for (const k of Object.keys(localStorage)) if (/^sb-/.test(k)) localStorage.removeItem(k); } catch {}
+// End this page's sign-in before leaving it; the approval already made stands.
+const endSession = async () => { try { await supabase.auth.signOut({ scope: 'local' }); } catch {} try { sessionStorage.clear(); } catch {} };
 const $ = (id) => document.getElementById(id);
 const say = (title, msg) => { $('title').textContent = title; $('msg').textContent = msg; $('buttons').textContent = ''; };
 const button = (label, onClick, cls = '') => {
@@ -42,7 +55,19 @@ const button = (label, onClick, cls = '') => {
 const backHere = () => location.origin + location.pathname + (authorizationId ? '?authorization_id=' + encodeURIComponent(authorizationId) : '');
 // Always show Google's account picker, so people with more than one account choose which one signs in.
 const signIn = () => supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: backHere(), queryParams: { prompt: 'select_account' } } });
-const switchAccount = async () => { await supabase.auth.signOut({ scope: 'local' }); signIn(); };
+const switchAccount = async () => { await endSession(); signIn(); };
+// Only a web address is followed; anything else ends here (code review and G9 security review of #385).
+const webAddress = (url) => /^https?:\/\//i.test(url || '');
+const go = (url) => (webAddress(url) ? (location.href = url) : say('Sign-in cancelled', 'You can close this tab.'));
+
+// The website a sign-in returns to: the real host of its return address, never text from the app's name.
+// Empty when the address is missing or is not a web address.
+const returnHost = (details) => {
+  try {
+    const url = new URL(details.redirect_uri);
+    return /^https?:$/.test(url.protocol) ? url.hostname : '';
+  } catch { return ''; }
+};
 
 const authorizationId = new URLSearchParams(location.search).get('authorization_id');
 
@@ -55,6 +80,7 @@ async function main() {
   }
   const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
   if (error || !data) {
+    await endSession();
     say('That did not work', 'This sign-in link may have expired. Open Gwen Data from Claude and try again.');
     return button('Use a different account', switchAccount);
   }
@@ -63,20 +89,32 @@ async function main() {
   // with two accounts can switch before going back.
   if (data.redirect_url) {
     say('Continue to Claude?', `You are signed in as ${who}.`);
-    button(`Continue as ${who}`, () => { location.href = data.redirect_url; }, 'go');
+    button(`Continue as ${who}`, async () => { await endSession(); if (!webAddress(data.redirect_url)) return go(''); location.href = data.redirect_url; }, 'go');
     return button('Use a different account', switchAccount);
   }
-  say('Allow Gwen Data?', `${data.client?.client_name || data.client?.name || 'Claude'} wants to read and keep your Gwen history as ${who}. You can stop this at any time.`);
   const finish = async (call) => {
     const { data: done, error: err } = await call(authorizationId);
     if (err || !done?.redirect_url) {
+      await endSession();
       say('That did not work', 'Open Gwen Data from Claude and try again.');
       return button('Use a different account', switchAccount);
     }
-    location.href = done.redirect_url;
+    await endSession();
+    go(done.redirect_url);
   };
+  const cancel = () => finish((id) => supabase.auth.oauth.denyAuthorization(id, { skipBrowserRedirect: true }));
+  // Name the website the sign-in returns to, so a connector cannot pass itself off as another app by its name.
+  const host = returnHost(data);
+  // The session stays until the person leaves this screen: Cancel ends it through finish, after the deny, and "Use a different
+  // account" ends it before signing in again (code review of #385).
+  if (!host) {
+    say('Cannot allow this sign-in', 'Gwen Data cannot tell where this sign-in would return to. Open Gwen Data from Claude and try again.');
+    button('Cancel', cancel);
+    return button('Use a different account', switchAccount);
+  }
+  say('Allow Gwen Data?', `${data.client?.client_name || data.client?.name || 'Claude'} on ${host} wants to read and keep your Gwen history as ${who}. You can stop this at any time.`);
   button('Allow', () => finish((id) => supabase.auth.oauth.approveAuthorization(id, { skipBrowserRedirect: true })), 'go');
-  button('Cancel', () => finish((id) => supabase.auth.oauth.denyAuthorization(id, { skipBrowserRedirect: true })));
+  button('Cancel', cancel);
   button('Use a different account', switchAccount);
 }
 main();
